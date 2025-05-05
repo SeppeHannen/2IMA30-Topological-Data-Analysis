@@ -3,7 +3,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 # --- CONFIG ---
-FILE = "data/Cherry Trees/bag_0/cloud_final.ply"
+FILE = "data/bag_0/cloud_final.ply"
 VOXEL = 0.002                     # 2 mm down-sample (tweak)
 
 # --- LOAD ---
