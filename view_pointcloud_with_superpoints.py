@@ -21,7 +21,6 @@ def superpoint_selection(pts, r_super=0.1):
     super_points = []
     while not np.all(bool_pts):
         remaining_indices = np.where(~bool_pts)[0] # Remaining Indices
-        print(np.sum(~bool_pts))
         pts_remain = pts[~bool_pts] # Uncovered Points
         rand_super_pt = pts_remain[np.random.choice(pts_remain.shape[0])] # Randomly Chosen Super Point
 
