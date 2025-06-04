@@ -1,0 +1,6 @@
+numpy
+scikit-learn
+matplotlib
+open3d
+gudhi
+ripser
