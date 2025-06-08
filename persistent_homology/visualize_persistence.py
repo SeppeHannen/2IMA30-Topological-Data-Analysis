@@ -40,18 +40,18 @@ def compute_connected_component_edges(points, max_dim=1, max_edge=None, threshol
     edges = []
     kept = 0
     skipped = 0
-    for v_birth, v1, v2 in dim0_pairs:
-        edge = [min(v1, v2), max(v1, v2)]
+    for v_birth, v1_death, v2_death in dim0_pairs:
+        edge = [min(v1_death, v2_death), max(v1_death, v2_death)]
         death = st.filtration(edge)
         if threshold is None or death >= threshold:
-            edges.append((v1, v2))
+            edges.append((v1_death, v2_death))
             kept += 1
             if log_file:
-                log(log_file, f"KEPT   Edge ({v1}, {v2}) has length {death:.8f}")
+                log(log_file, f"KEPT   Edge ({v1_death}, {v2_death}) has length {death:.8f}")
         else:
             skipped += 1
             if log_file:
-                log(log_file, f"SKIPPED Edge ({v1}, {v2}) has length {death:.8f}")
+                log(log_file, f"SKIPPED Edge ({v1_death}, {v2_death}) has length {death:.8f}")
     if log_file:
         log(log_file, f"---\nKept {kept} edges, skipped {skipped} below threshold {threshold}")
     return edges
