@@ -4,3 +4,4 @@ matplotlib
 open3d
 gudhi
 ripser
+networkx
