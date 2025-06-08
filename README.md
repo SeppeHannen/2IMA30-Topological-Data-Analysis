@@ -26,3 +26,13 @@ Google Drive location.
    python google_drive_helper.py download <FILE_ID> --dest data/filename.ply
    python google_drive_helper.py download-folder <FOLDER_ID> --dest data/
    ```
+
+## Visualizing Persistent Features
+
+Run `visualize_persistence.py` to display persistent connected components and cycles on top of a point cloud.
+Example:
+```bash
+python visualize_persistence.py dataset/tree_0.pcd --sample 2000 --voxel 0.01 --cycle_thresh 0.05
+```
+This downsamples the cloud, computes persistence up to dimension 1 and overlays the longest cycles in blue and the merging edges in red.
+
