@@ -4,8 +4,8 @@ import numpy as np
 import open3d as o3d
 import matplotlib.pyplot as plt
 
-DATA_DIR = os.path.join(os.path.dirname(__file__), 'dataset')
-PROC_DIR = os.path.join(os.path.dirname(__file__), 'dataset_processed')
+DATA_DIR = os.path.join(os.path.dirname(__file__), '..', 'dataset')
+PROC_DIR = os.path.join(os.path.dirname(__file__), '..', 'dataset_processed')
 
 
 def load_raw(index):
