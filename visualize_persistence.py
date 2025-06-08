@@ -18,6 +18,12 @@ def load_points(file_path, sample=None, voxel=None):
 
 
 def compute_connected_component_edges(points, max_dim=1, max_edge=None, threshold=None):
+    if max_edge is None:
+        # Use the diagonal of the point cloud's bounding box as a safe upper
+        # bound for the maximal edge length. GUDHI requires a finite number
+        # here, so fall back to the dataset extent if no value is supplied.
+        max_edge = float(np.linalg.norm(points.max(axis=0) - points.min(axis=0)))
+
     rips = gudhi.RipsComplex(points=points, max_edge_length=max_edge)
     st = rips.create_simplex_tree(max_dimension=max_dim)
     st.persistence()
