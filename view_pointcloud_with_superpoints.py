@@ -32,7 +32,7 @@ def superpoint_selection(pts, r_super=0.1):
 
     return np.array(super_points)
 
-r_super = 0.1
+r_super = 0.05
 super_points = superpoint_selection(pts, r_super)
 
 # Create List of Sphere Geometries at each Superpoint
