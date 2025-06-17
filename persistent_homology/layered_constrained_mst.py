@@ -112,7 +112,8 @@ def layered_constrained_mst(
         ax.set_ylim(mid[1] - max_range, mid[1] + max_range)
         ax.set_zlim(mid[2] - max_range, mid[2] + max_range)
 
-        plt.show()
+        fig.savefig("layered_mst.png", bbox_inches="tight")
+        plt.close(fig)
 
     all_edges = [e for layer in edges_by_layer for e in layer]
     return all_edges
