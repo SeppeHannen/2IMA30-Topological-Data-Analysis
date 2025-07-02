@@ -1,295 +1,276 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 """
-partitioned_mst.py
-==================
-Build a **Partitioned Minimum Spanning Tree** (PMST) skeleton for a 3‑D point
-cloud and visualise it interactively with Open3D.
-
-Changes versus the original script
-----------------------------------
-* Accept an arbitrary scalar function (`--scalar-axis`) for stratification.
-* Strictly forbid intra‑layer edges after the root layer.
-* Attach each new point to its nearest processed neighbour via a KD‑tree
-  (O(n log n) instead of O(n²)).
-* Separate pure algorithm from visualisation.
-* Use Open3D `draw_geometries` for fully rotatable inspection; PNG snapshot is
-  optional.
-* Clean, three‑colour palette matches the number of layers.
-
-Run with:
-    python partitioned_mst.py tree.ply --layers 3 --scalar-axis z
-
-Press the mouse buttons to rotate/zoom in the Open3D window.
+Partitioned (layered) MST skeletonisation, with
+• optional k-NN pruning,
+• optional random sampling,
+• orientation arrow,
+• and a plain MST mode when --layers 1.
 """
-
-from __future__ import annotations
 
 import argparse
-import datetime as _dt
-import os
-from pathlib import Path
-from typing import Callable, List, Sequence, Tuple
+from collections import defaultdict
+from itertools import combinations
+from typing import List, Tuple, Optional
 
 import numpy as np
 import open3d as o3d
-from networkx.utils import UnionFind
-from scipy.spatial import cKDTree
-from tqdm import tqdm
-
-###############################################################################
-# Utility helpers
-###############################################################################
-
-LAYER_COLOURS = np.array(
-    [[0.1216, 0.4667, 0.7059],   # tab10[0]
-     [1.0000, 0.4980, 0.0549],   # tab10[1]
-     [0.1725, 0.6275, 0.1725]],  # tab10[2]
-    dtype=np.float64,
-)
 
 
-def _create_log_file() -> "os.PathLike[str] | None":
-    """Create and return a timestamped log‑file handle (or *None* if logs dir
-    is not writable)."""
-    log_dir = Path("logs")
-    try:
-        log_dir.mkdir(exist_ok=True)
-        now = _dt.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        return open(log_dir / f"pmst_{now}.txt", "w", encoding="utf-8")
-    except OSError:
-        return None
+# ───────────  Union–Find  ───────────
+class UnionFind:
+    def __init__(self, n: int):
+        self.parent = list(range(n))
+        self.rank = [0] * n
+
+    def find(self, x: int) -> int:
+        while self.parent[x] != x:
+            self.parent[x] = self.parent[self.parent[x]]
+            x = self.parent[x]
+        return x
+
+    def union(self, x: int, y: int) -> bool:
+        rx, ry = self.find(x), self.find(y)
+        if rx == ry:
+            return False
+        if self.rank[rx] < self.rank[ry]:
+            self.parent[rx] = ry
+        else:
+            self.parent[ry] = rx
+            if self.rank[rx] == self.rank[ry]:
+                self.rank[rx] += 1
+        return True
 
 
-def _log(handle, msg: str) -> None:  # noqa: D401  (simple description)
-    if handle is None:
-        print(msg)
-    else:
-        print(msg)
-        handle.write(msg + "\n")
-
-
-###############################################################################
-# I/O
-###############################################################################
-
-def load_points(path: os.PathLike | str, *, sample: int | None = None,
-                voxel: float | None = None) -> Tuple[np.ndarray, o3d.geometry.PointCloud]:
-    """Read a point cloud and return *(n,3) numpy array*, *PointCloud* pair.
-
-    Parameters
-    ----------
-    path : str | Path
-        PLY/PCD/other format recognised by Open3D.
-    sample : int, optional
-        Uniformly random down‑sample to *sample* points.
-    voxel : float, optional
-        Pre‑voxelisation size in the same unit as *path*.
-    """
-    pcd = o3d.io.read_point_cloud(str(path))
+# ───────────  I/O  ───────────
+def load_points(path: str, *, sample: Optional[int] = None,
+                voxel: Optional[float] = None):
+    pcd = o3d.io.read_point_cloud(path)
     if voxel:
         pcd = pcd.voxel_down_sample(voxel)
-    pts = np.asarray(pcd.points, dtype=np.float64)
-    if sample and pts.shape[0] > sample:
+    pts = np.asarray(pcd.points)
+
+    if sample is not None and pts.shape[0] > sample:
         idx = np.random.choice(pts.shape[0], sample, replace=False)
         pts = pts[idx]
         pcd.points = o3d.utility.Vector3dVector(pts)
     return pts, pcd
 
 
-###############################################################################
-# Core algorithm
-###############################################################################
+# ───────────  Partition helper  ───────────
+def partition_by_scalar(values: np.ndarray, k: int) -> List[np.ndarray]:
+    vmin, vmax = float(values.min()), float(values.max())
+    bins = np.linspace(vmin, vmax, k + 1)
+    layers = defaultdict(list)
+    for idx, v in enumerate(values):
+        layer = np.searchsorted(bins, v, side="right") - 1
+        layers[min(max(layer, 0), k - 1)].append(idx)
+    return [np.asarray(layers[i], dtype=int) for i in range(k)]
 
-def build_partitioned_mst(
-    points: np.ndarray,
-    *,
-    scalar: np.ndarray | None = None,
-    num_layers: int = 3,
-    k_neighbours: int = 1,
-    log_fn: Callable[[str], None] | None = None,
-) -> List[List[Tuple[int, int]]]:
-    """Create a partitioned MST skeleton.
 
-    Parameters
-    ----------
-    points : (n,3) array_like
-        Input point coordinates.
-    scalar : (n,) array_like, optional
-        Scalar per point defining the ordered strata. Defaults to *z*‑axis.
-    num_layers : int, default = 3
-        Number of equal‑sized partitions along *scalar*.
-    k_neighbours : int, default = 1
-        Attach each new point to its *k* closest processed vertices.
-    log_fn : callable(str), optional
-        Logging function.
+# ───────────  Plain MST  ───────────
+def build_plain_mst(pts: np.ndarray, *, knn: Optional[int] = None,
+                    verbose: bool = False) -> List[Tuple[int, int, int]]:
+    """Classic Kruskal on the whole point set."""
+    n = pts.shape[0]
+    uf = UnionFind(n)
+    edges: List[Tuple[int, int, int]] = []
 
-    Returns
-    -------
-    list(list(tuple(int,int)))
-        ``edges_by_layer[i]`` holds the edges *added* while processing layer *i*.
-    """
-    if points.ndim != 2 or points.shape[1] != 3:
-        raise ValueError("points must have shape (n, 3)")
+    if knn is None:
+        # Exhaustive edge list
+        cand = [(np.linalg.norm(pts[u] - pts[v]), u, v)
+                for u, v in combinations(range(n), 2)]
+    else:
+        from scipy.spatial import cKDTree
+        tree = cKDTree(pts)
+        k = min(knn + 1, n)
+        dists, nbrs = tree.query(pts, k=k)
+        cand = []
+        for u in range(n):
+            for dist, j in zip(dists[u, 1:], nbrs[u, 1:]):
+                cand.append((dist, u, j))
 
-    if scalar is None:
-        scalar = points[:, 2]  # default to z‑axis
-    scalar = np.asarray(scalar, dtype=np.float64)
+    cand.sort(key=lambda x: x[0])
 
-    idx_sorted = np.argsort(scalar)
-    slices: List[np.ndarray] = np.array_split(idx_sorted, num_layers)
+    for w, u, v in cand:
+        if uf.union(u, v):
+            edges.append((u, v, 0))          # layer tag 0 for colouring
+            if len(edges) == n - 1:
+                break
 
-    uf = UnionFind(range(len(points)))
+    assert len(edges) == n - 1, "MST failed (wrong edge count)"
+    if verbose:
+        print(f"Plain MST: {len(edges)} edges (n-1={n-1})")
+    return edges
+
+
+# ───────────  Layered MST  ───────────
+def build_partitioned_mst(pts: np.ndarray, layers: List[np.ndarray],
+                          *, knn: Optional[int] = None,
+                          verbose: bool = False):
+    n = pts.shape[0]
+    uf = UnionFind(n)
+    edges: List[Tuple[int, int, int]] = []
     processed: set[int] = set()
-    edges_by_layer: List[List[Tuple[int, int]]] = []
 
-    if log_fn:
-        log_fn(f"Partitioned MST over {len(points)} pts in {num_layers} layers")
+    if knn is not None:
+        from scipy.spatial import cKDTree
 
-    for layer_idx, layer in enumerate(tqdm(slices, desc="Layers")):
-        layer_pts = points[layer]
-        new_edges: List[Tuple[int, int]] = []
+    for lid, idxs in enumerate(layers):
+        if verbose:
+            print(f"Layer {lid}: {len(idxs)} vertices")
 
-        if layer_idx == 0:
-            # Build an MST *within* the root layer using Kruskal on the full
-            # graph (dense but small in practice).
-            candidates: List[Tuple[float, int, int]] = []
-            for i in range(len(layer)):
-                for j in range(i + 1, len(layer)):
-                    u, v = int(layer[i]), int(layer[j])
-                    w = float(np.linalg.norm(points[u] - points[v]))
-                    candidates.append((w, u, v))
-            candidates.sort()
-            for w, u, v in candidates:  # noqa: E741  (avoid l not needed)
-                if uf[u] != uf[v]:
-                    uf.union(u, v)
-                    new_edges.append((u, v))
-        else:
-            # Attach each new point only to already‑processed vertices.
-            tree = cKDTree(points[list(processed)])
-            processed_list = np.fromiter(processed, dtype=int)
+        cand: List[Tuple[float, int, int]] = []
 
-            for u in layer:
-                # k=1 gives a pure tree; k>1 adds robustness on noisy data.
-                k = min(k_neighbours, len(processed_list))
-                dists, idxs = tree.query(points[u], k=k)
-                if k == 1:
-                    dists = [dists]
-                    idxs = [idxs]
-                for idx in np.atleast_1d(idxs):
-                    v = int(processed_list[int(idx)])
-                    if uf[u] != uf[v]:
-                        uf.union(u, v)
-                        new_edges.append((u, v))
-                        break  # one edge per new vertex is enough
+        # internal edges
+        if len(idxs) > 1:
+            if knn is None:
+                for u, v in combinations(idxs, 2):
+                    cand.append((np.linalg.norm(pts[u] - pts[v]), u, v))
+            else:
+                k = min(knn + 1, len(idxs))
+                tree = cKDTree(pts[idxs])
+                dists, nbrs = tree.query(pts[idxs], k=k)
+                for row_i, u in enumerate(idxs):
+                    for dist, j in zip(dists[row_i, 1:], nbrs[row_i, 1:]):
+                        cand.append((dist, u, idxs[j]))
 
-        edges_by_layer.append(new_edges)
-        processed.update(map(int, layer))
-        if log_fn:
-            log_fn(f"  Layer {layer_idx}: +{len(layer)} pts, +{len(new_edges)} edges")
+        # cross-layer edges
+        if processed:
+            prev = np.fromiter(processed, dtype=int)
+            if knn is None:
+                for u in idxs:
+                    for v in prev:
+                        cand.append((np.linalg.norm(pts[u] - pts[v]), u, v))
+            else:
+                tree_prev = cKDTree(pts[prev])
+                k = min(knn, len(prev))
+                dists, nbrs = tree_prev.query(pts[idxs], k=k)
+                for row_i, u in enumerate(idxs):
+                    for dist, j in zip(np.atleast_1d(dists[row_i]),
+                                       np.atleast_1d(nbrs[row_i])):
+                        cand.append((dist, u, prev[j]))
 
-    return edges_by_layer
+        if not cand and len(idxs) <= 1 and not processed:
+            processed.update(idxs.tolist())
+            continue
+
+        cand.sort(key=lambda x: x[0])
+        root_target = uf.find(next(iter(processed)) if processed else idxs[0])
+
+        for w, u, v in cand:
+            if uf.union(u, v):
+                edges.append((u, v, lid))
+            if all(uf.find(x) == root_target for x in idxs):
+                break
+
+        processed.update(idxs.tolist())
+
+    assert len(edges) == n - 1, (
+        f"Expected {n - 1} edges, got {len(edges)}")
+    return edges
 
 
-###############################################################################
-# Visualisation
-###############################################################################
+# ───────────  Visuals  ───────────
+def create_arrow(dir_vec, center, length, color=(1, 0, 0)):
+    d = dir_vec / np.linalg.norm(dir_vec)
+    cyl_h, cone_h = 0.8 * length, 0.2 * length
+    arrow = o3d.geometry.TriangleMesh.create_arrow(0.015 * length, 0.03 * length,
+                                                   cyl_h, cone_h)
+    arrow.paint_uniform_color(color)
 
-def visualise_open3d(
-    points: np.ndarray,
-    edges_by_layer: Sequence[Sequence[Tuple[int, int]]],
-    *,
-    window_name: str = "Partitioned MST",
-    snapshot: str | None = None,
-) -> None:
-    """Display the skeleton and optionally save a PNG snapshot."""
+    z = np.array([0, 0, 1])
+    if np.allclose(d, z):
+        R = np.eye(3)
+    elif np.allclose(d, -z):
+        R = o3d.geometry.get_rotation_matrix_from_axis_angle(np.pi * np.array([0, 1, 0]))
+    else:
+        axis = np.cross(z, d)
+        axis /= np.linalg.norm(axis)
+        angle = float(np.arccos(np.clip(np.dot(z, d), -1, 1)))
+        R = o3d.geometry.get_rotation_matrix_from_axis_angle(axis * angle)
+    arrow.rotate(R, center=(0, 0, 0))
+    arrow.translate(center)
+    return arrow
 
-    pcd = o3d.geometry.PointCloud()
-    pcd.points = o3d.utility.Vector3dVector(points)
-    pcd.paint_uniform_color([0.7, 0.7, 0.7])
 
-    lines = []
-    colours = []
-    for layer_idx, e_list in enumerate(edges_by_layer):
-        colour = LAYER_COLOURS[layer_idx % len(LAYER_COLOURS)]
-        for u, v in e_list:
-            lines.append([u, v])
-            colours.append(colour)
+def visualize(pts, pcd, edges, n_layers, dir_vec):
+    import matplotlib.pyplot as plt
+    cmap = plt.get_cmap("tab10")
 
     line_set = o3d.geometry.LineSet()
-    line_set.points = o3d.utility.Vector3dVector(points)
-    line_set.lines = o3d.utility.Vector2iVector(lines)
-    line_set.colors = o3d.utility.Vector3dVector(colours)
+    line_set.points = o3d.utility.Vector3dVector(pts)
+    line_set.lines = o3d.utility.Vector2iVector([(u, v) for u, v, _ in edges])
+    line_set.colors = o3d.utility.Vector3dVector(
+        [cmap(l / max(1, n_layers - 1))[:3] for _, _, l in edges])
 
-    o3d.visualization.draw_geometries([pcd, line_set], window_name=window_name)
+    diag = np.linalg.norm(pts.max(0) - pts.min(0))
+    arrow = create_arrow(dir_vec, pts.mean(0), 0.25 * diag)
 
-    if snapshot:
-        vis = o3d.visualization.Visualizer()
-        vis.create_window(visible=False)
-        vis.add_geometry(pcd)
-        vis.add_geometry(line_set)
-        vis.poll_events()
-        vis.update_renderer()
-        vis.capture_screen_image(snapshot, do_render=True)
-        vis.destroy_window()
+    vis = o3d.visualization.VisualizerWithKeyCallback()
+    vis.create_window("Partitioned MST")
+    vis.add_geometry(pcd.paint_uniform_color([0.05, 0.05, 0.05]))
+    vis.add_geometry(line_set)
+    vis.add_geometry(arrow)
 
+    def print_front(_):
+        cam = vis.get_view_control().convert_to_pinhole_camera_parameters()
+        front = -cam.extrinsic[:3, 2]
+        print("\n[P] camera front direction:", np.round(front, 6))
+        return False
 
-###############################################################################
-# CLI
-###############################################################################
-
-def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Partitioned MST skeletoniser")
-    parser.add_argument("pcd", help="Path to point cloud (.pcd/.ply)")
-    parser.add_argument("--layers", type=int, default=3, help="Number of layers")
-    parser.add_argument("--scalar-axis", choices=["x", "y", "z"], default="z",
-                        help="Coordinate axis used as scalar function")
-    parser.add_argument("--sample", type=int,
-                        help="Randomly sample this many points before processing")
-    parser.add_argument("--voxel", type=float,
-                        help="Voxel size before sampling (same units as input)")
-    parser.add_argument("--k", "--k-neighbours", type=int, default=1,
-                        help="Attach each new vertex to k nearest neighbours in processed set")
-    parser.add_argument("--no-vis", action="store_true", help="Skip the 3‑D viewer")
-    parser.add_argument("--snapshot", metavar="FILE",
-                        help="Also save a PNG snapshot to FILE")
-    return parser.parse_args(argv)
+    vis.register_key_callback(ord("P"), print_front)
+    vis.run()
+    vis.destroy_window()
 
 
-###############################################################################
-# Entry‑point
-###############################################################################
+# ───────────  CLI  ───────────
+def vec3(text: str) -> np.ndarray:
+    try:
+        v = np.fromstring(text, sep=",", dtype=float)
+        if v.size != 3 or np.linalg.norm(v) == 0:
+            raise ValueError
+        return v
+    except ValueError:
+        raise argparse.ArgumentTypeError("Direction must be 'dx,dy,dz'")
 
-def main(argv: Sequence[str] | None = None) -> None:
-    args = _parse_args(argv)
 
-    log_handle = _create_log_file()
-    log = lambda m: _log(log_handle, m)
+def main():
+    ap = argparse.ArgumentParser("Partitioned MST (layered) – with plain MST mode")
+    ap.add_argument("pcd")
+    ap.add_argument("--layers", type=int, default=5)
+    ap.add_argument("--sample", type=int, help="Randomly sample N points")
+    ap.add_argument("--voxel", type=float, help="Voxel size before sampling")
+    ap.add_argument("--direction", type=vec3, default=np.array([0, -1, 0]),
+                    help="Height/projection direction")
+    ap.add_argument("--knn", type=int,
+                    help="Prune candidate edges to k nearest neighbours "
+                         "(omit for exact algorithm)")
+    ap.add_argument("--verbose", action="store_true")
+    ap.add_argument("--export", type=str,
+                  help="Save pts+edges to NPZ (for scripted comparisons)")
+    args = ap.parse_args()
 
-    log(f"Loading point cloud: {args.pcd}")
-    points, _ = load_points(args.pcd, sample=args.sample, voxel=args.voxel)
-    log(f"Loaded {len(points)} points")
+    dir_vec = args.direction / np.linalg.norm(args.direction)
+    pts, pcd = load_points(args.pcd, sample=args.sample, voxel=args.voxel)
 
-    axis_map = {"x": 0, "y": 1, "z": 2}
-    scalar = points[:, axis_map[args.scalar_axis]]
+    if args.layers == 1:
+        edges = build_plain_mst(pts, knn=args.knn, verbose=args.verbose)
+        n_layers_for_color = 1          # colouring all edges the same
+    else:
+        scalar = pts @ dir_vec
+        layers = partition_by_scalar(scalar, args.layers)
+        edges = build_partitioned_mst(pts, layers,
+                                      knn=args.knn, verbose=args.verbose)
+        n_layers_for_color = args.layers
 
-    log("Building partitioned MST …")
-    edges_by_layer = build_partitioned_mst(
-        points,
-        scalar=scalar,
-        num_layers=args.layers,
-        k_neighbours=args.k,
-        log_fn=log,
-    )
+    visualize(pts, pcd, edges, n_layers_for_color, dir_vec)
 
-    log("Skeleton built. Visualising …" if not args.no_vis else "Skeleton built.")
-
-    if not args.no_vis or args.snapshot:
-        visualise_open3d(points, edges_by_layer,
-                         snapshot=args.snapshot,
-                         window_name=f"PMST – {Path(args.pcd).name}")
-
-    if log_handle is not None:
-        log_handle.close()
+    # ---------- export ----------
+    if args.export:
+        np.savez(args.export, pts=pts,
+                 edges=np.asarray(edges, dtype=np.int32))
+        if args.verbose:
+            print(f"NPZ saved → {args.export}")
 
 
 if __name__ == "__main__":

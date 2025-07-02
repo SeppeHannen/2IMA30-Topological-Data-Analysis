@@ -1,0 +1,8 @@
+Loading point cloud: ./dataset/tree_0.pcd
+Loaded 1000 points
+Building partitioned MST …
+Partitioned MST over 1000 pts in 3 layers
+  Layer 0: +334 pts, +333 edges
+  Layer 1: +333 pts, +333 edges
+  Layer 2: +333 pts, +333 edges
+Skeleton built. Visualising …

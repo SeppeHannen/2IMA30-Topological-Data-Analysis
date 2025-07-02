@@ -72,7 +72,7 @@ def run_side_by_side_viewer(pts_a, edges_a, pts_b, edges_b, n_layers_b=None):
 if __name__ == "__main__":
     # Replace these with your actual paths
     path_a = "persistent_homology/skeletons/tree_0_layers_1.npz"
-    path_b = "persistent_homology/skeletons/tree_0_layers_2.npz"
+    path_b = "persistent_homology/skeletons/tree_0_layers_5.npz"
 
     pts_a, edges_a = load_npz(path_a)
     pts_b, edges_b = load_npz(path_b)

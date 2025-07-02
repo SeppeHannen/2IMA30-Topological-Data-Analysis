@@ -1,0 +1,7 @@
+Loading point cloud: ./dataset/tree_0.pcd
+Loaded 1000 points
+Computing MST...
+Building MST over 1000 points in 3 layers
+Layer 0: 334 points
+Layer 1: 333 points
+Layer 2: 333 points
