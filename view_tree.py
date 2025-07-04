@@ -2,13 +2,13 @@ import open3d as o3d
 import numpy as np
 import matplotlib.pyplot as plt
 
-# --- CONFIG ---
-FILE = "data/bag_0/cloud_final.ply"
-VOXEL = 0.002                     # 2 mm down-sample (tweak)
+# --- CONFIG (Edit parameters here) ---
+FILE = "data/bag_0/cloud_final.ply" # Which point cloud to load
+VOXEL = 0.002                       # Side length used for voxel downsampling
 
 # --- LOAD ---
 pcd = o3d.io.read_point_cloud(FILE)
-print(pcd)                        # point count
+print(pcd)                          # point count
 
 # --- DOWNSAMPLE & COLOR BY HEIGHT ---
 pcd = pcd.voxel_down_sample(VOXEL)
